@@ -39,45 +39,41 @@ const getDateRange = (period) => {
 // Summary
 router.get('/summary', authenticateToken, async (req, res) => {
   try {
-    const { period = 'month' } = req.query;
-    const { startDate, endDate } = getDateRange(period);
+    const { startDate, endDate } = req.query;
 
+    // ✅ FIXED: Use fact_expenses with dimension joins
     const { data: expenses, error } = await supabase
-      .from('expenses')
-      .select('amount, category')
-      .eq('user_id', req.user.userId)
-      .gte('date', startDate)
-      .lte('date', endDate);
-
-    if (error) throw error;
-
-    const totalSpent = expenses.reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
-    const categoryTotals = {};
-    
-    expenses.forEach(exp => {
-      categoryTotals[exp.category] = (categoryTotals[exp.category] || 0) + parseFloat(exp.amount);
-    });
-
-    const topCategories = Object.entries(categoryTotals)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([category, amount]) => ({
-        category,
+      .from('fact_expenses')
+      .select(`
         amount,
-        percentage: totalSpent > 0 ? (amount / totalSpent) * 100 : 0
-      }));
+        dim_category!fact_expenses_category_id_fkey(category_name)
+      `)
+      .eq('user_id', req.user.userId)
+      .gte('date_id', startDate || getDateRange('month').startDate)
+      .lte('date_id', endDate || getDateRange('month').endDate);
+
+    if (error) {
+      console.error('Supabase error:', error);
+      throw error;
+    }
+
+    const totalAmount = expenses.reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
+    const expenseCount = expenses.length;
+    const averageAmount = expenseCount > 0 ? totalAmount / expenseCount : 0;
 
     res.json({
       success: true,
-      summary: {
-        period,
-        totalSpent,
-        expenseCount: expenses.length,
-        averageExpense: expenses.length > 0 ? totalSpent / expenses.length : 0,
-        topCategories
+      totalAmount: parseFloat(totalAmount.toFixed(2)),
+      averageAmount: parseFloat(averageAmount.toFixed(2)),
+      expenseCount,
+      total_expenses: expenseCount,
+      period: {
+        startDate: startDate || getDateRange('month').startDate,
+        endDate: endDate || getDateRange('month').endDate
       }
     });
   } catch (error) {
+    console.error('Summary error:', error);
     res.status(500).json({ error: 'Failed to fetch summary', message: error.message });
   }
 });
@@ -85,37 +81,52 @@ router.get('/summary', authenticateToken, async (req, res) => {
 // By category
 router.get('/by-category', authenticateToken, async (req, res) => {
   try {
-    const { period = 'month' } = req.query;
-    const { startDate, endDate } = getDateRange(period);
+    const { startDate, endDate } = req.query;
 
+    // ✅ FIXED: Use fact_expenses with dimension joins
     const { data: expenses, error } = await supabase
-      .from('expenses')
-      .select('amount, category')
+      .from('fact_expenses')
+      .select(`
+        amount,
+        dim_category!fact_expenses_category_id_fkey(category_name)
+      `)
       .eq('user_id', req.user.userId)
-      .gte('date', startDate)
-      .lte('date', endDate);
+      .gte('date_id', startDate || getDateRange('month').startDate)
+      .lte('date_id', endDate || getDateRange('month').endDate);
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase error:', error);
+      throw error;
+    }
 
     const categoryData = {};
     let totalSpent = 0;
 
     expenses.forEach(exp => {
       const amount = parseFloat(exp.amount);
-      categoryData[exp.category] = (categoryData[exp.category] || 0) + amount;
+      const categoryName = exp.dim_category?.category_name || 'Other';
+      categoryData[categoryName] = (categoryData[categoryName] || 0) + amount;
       totalSpent += amount;
     });
 
     const categories = Object.entries(categoryData)
-      .map(([category, amount]) => ({
+      .map(([category, total_amount]) => ({
         category,
-        amount,
-        percentage: totalSpent > 0 ? (amount / totalSpent) * 100 : 0
+        totalAmount: parseFloat(total_amount.toFixed(2)),
+        total_amount: parseFloat(total_amount.toFixed(2)),
+        count: expenses.filter(e => (e.dim_category?.category_name || 'Other') === category).length,
+        percentage: totalSpent > 0 ? parseFloat(((total_amount / totalSpent) * 100).toFixed(2)) : 0
       }))
-      .sort((a, b) => b.amount - a.amount);
+      .sort((a, b) => b.totalAmount - a.totalAmount);
 
-    res.json({ success: true, categories, totalSpent });
+    res.json({ 
+      success: true, 
+      categories, 
+      totalAmount: parseFloat(totalSpent.toFixed(2)),
+      totalSpent: parseFloat(totalSpent.toFixed(2))
+    });
   } catch (error) {
+    console.error('Category error:', error);
     res.status(500).json({ error: 'Failed to fetch categories', message: error.message });
   }
 });
@@ -127,22 +138,22 @@ router.get('/trends', authenticateToken, async (req, res) => {
     const { startDate, endDate } = getDateRange(period);
 
     const { data: expenses, error } = await supabase
-      .from('expenses')
-      .select('amount, date')
+      .from('fact_expenses')
+      .select('amount, date_id')
       .eq('user_id', req.user.userId)
-      .gte('date', startDate)
-      .lte('date', endDate)
-      .order('date', { ascending: true });
+      .gte('date_id', startDate)
+      .lte('date_id', endDate)
+      .order('date_id', { ascending: true });
 
     if (error) throw error;
 
     const trendData = {};
     expenses.forEach(exp => {
-      if (!trendData[exp.date]) {
-        trendData[exp.date] = { date: exp.date, total: 0, count: 0 };
+      if (!trendData[exp.date_id]) {
+        trendData[exp.date_id] = { date: exp.date_id, total: 0, count: 0 };
       }
-      trendData[exp.date].total += parseFloat(exp.amount);
-      trendData[exp.date].count += 1;
+      trendData[exp.date_id].total += parseFloat(exp.amount);
+      trendData[exp.date_id].count += 1;
     });
 
     res.json({ success: true, trends: Object.values(trendData) });
@@ -163,11 +174,11 @@ router.get('/monthly-comparison', authenticateToken, async (req, res) => {
       const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
 
       const { data: expenses } = await supabase
-        .from('expenses')
+        .from('fact_expenses')
         .select('amount')
         .eq('user_id', req.user.userId)
-        .gte('date', monthStart.toISOString().split('T')[0])
-        .lte('date', monthEnd.toISOString().split('T')[0]);
+        .gte('date_id', monthStart.toISOString().split('T')[0])
+        .lte('date_id', monthEnd.toISOString().split('T')[0]);
 
       monthlyData.push({
         month: monthStart.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
@@ -189,10 +200,10 @@ router.get('/insights', authenticateToken, async (req, res) => {
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
     const { data: expenses } = await supabase
-      .from('expenses')
+      .from('fact_expenses')
       .select('*')
       .eq('user_id', req.user.userId)
-      .gte('date', thirtyDaysAgo.toISOString().split('T')[0]);
+      .gte('date_id', thirtyDaysAgo.toISOString().split('T')[0]);
 
     const insights = [];
     const total = expenses?.reduce((sum, exp) => sum + parseFloat(exp.amount), 0) || 0;
