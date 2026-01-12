@@ -351,9 +351,9 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
       }])
       .select(`
         *,
-        dim_category!fact_receipts_category_id_fkey(category_name),
-        dim_date!fact_receipts_date_id_fkey(date_id),
-        dim_store!fact_receipts_store_id_fkey(store_name)
+        dim_category!fk_category(category_name, category_type, icon_name, color_code),
+        dim_date!fk_date(date_id, year, month, day_of_month),
+        dim_store!fk_store(store_name, store_type, location)
       `)
       .single();
 
@@ -405,9 +405,9 @@ router.get('/receipts', authenticateToken, async (req, res) => {
       .from('fact_receipts')
       .select(`
         *,
-        dim_category!fact_receipts_category_id_fkey(category_name),
-        dim_date!fact_receipts_date_id_fkey(date_id, year, month, day_of_month),
-        dim_store!fact_receipts_store_id_fkey(store_name)
+        dim_category!fk_category(category_name, category_type, icon_name, color_code),
+        dim_date!fk_date(date_id, year, month, day_of_month),
+        dim_store!fk_store(store_name, store_type, location)
       `)
       .eq('user_id', req.user.userId)
       .order('created_at', { ascending: false })
@@ -436,9 +436,9 @@ router.get('/receipts/:id', authenticateToken, async (req, res) => {
       .from('fact_receipts')
       .select(`
         *,
-        dim_category!fact_receipts_category_id_fkey(category_name),
-        dim_date!fact_receipts_date_id_fkey(date_id),
-        dim_store!fact_receipts_store_id_fkey(store_name)
+        dim_category!fk_category(category_name, category_type, icon_name, color_code),
+        dim_date!fk_date(date_id, year, month, day_of_month),
+        dim_store!fk_store(store_name, store_type, location)
       `)
       .eq('receipt_id', req.params.id)
       .eq('user_id', req.user.userId)
