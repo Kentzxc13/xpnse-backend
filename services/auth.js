@@ -25,7 +25,18 @@ router.post('/register', async (req, res) => {
 
     console.log('📝 Registration attempt:', { email, name });
 
-    // Check if user exists
+    // ⭐ FIX: Check dim_user first
+    const { data: existingDimUser } = await supabase
+      .from('dim_user')
+      .select('user_id')
+      .eq('email', email)
+      .single();
+
+    if (existingDimUser) {
+      return res.status(409).json({ error: 'User already exists' });
+    }
+
+    // Check if user exists in Auth
     const { data: existingUsers } = await supabase.auth.admin.listUsers();
     const userExists = existingUsers?.users?.find(u => u.email === email);
 
@@ -103,41 +114,66 @@ router.post('/login', async (req, res) => {
 
     console.log('🔐 Login attempt:', { email });
 
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email,
-      password
-    });
+    // ⭐ FIX: Check dim_user first to get correct user_id
+    const { data: dimUserData, error: dimUserError } = await supabase
+      .from('dim_user')
+      .select('user_id, email, full_name, auth_provider')
+      .eq('email', email)
+      .single();
 
-    if (authError) {
-      console.error('❌ Login error:', authError);
+    if (dimUserData) {
+      console.log('✅ User found in dim_user:', dimUserData.user_id);
+      
+      // If user was created via Google, they can't login with password
+      if (dimUserData.auth_provider === 'GOOGLE') {
+        return res.status(400).json({ 
+          error: 'Please sign in with Google',
+          message: 'This account was created with Google Sign-In. Please use Google to login.'
+        });
+      }
+      
+      // Try to sign in with Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
+
+      if (authError) {
+        console.error('❌ Login error:', authError);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      console.log('✅ Login successful:', dimUserData.user_id);
+
+      // ⭐ FIX: Use the user_id from dim_user, not from auth
+      const token = jwt.sign(
+        { userId: dimUserData.user_id, email },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      res.json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: {
+          id: dimUserData.user_id,
+          email: dimUserData.email,
+          name: dimUserData.full_name
+        }
+      });
+    } else {
+      // User doesn't exist in dim_user
+      console.log('❌ User not found in dim_user');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-
-    console.log('✅ Login successful:', authData.user.id);
-
-    const token = jwt.sign(
-      { userId: authData.user.id, email },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
-
-    res.json({
-      success: true,
-      message: 'Login successful',
-      token,
-      user: {
-        id: authData.user.id,
-        email: authData.user.email,
-        name: authData.user.user_metadata?.name
-      }
-    });
   } catch (error) {
     console.error('❌ Login error:', error);
     res.status(500).json({ error: 'Login failed', message: error.message });
   }
 });
 
-// Google Sign-In
+// ⭐ FIXED: Google Sign-In - Check dim_user first!
 router.post('/google', async (req, res) => {
   try {
     const { email, name, googleId, photoUrl } = req.body;
@@ -146,21 +182,37 @@ router.post('/google', async (req, res) => {
       return res.status(400).json({ error: 'Email and name are required' });
     }
 
-    console.log('🔐 Google Sign-In attempt:', { email, name });
+    console.log('🔐 Google Sign-In attempt:', { email, name, googleId });
 
-    // Check if user exists
-    const { data: existingUsers } = await supabase.auth.admin.listUsers();
-    const user = existingUsers?.users?.find(u => u.email === email);
+    // ⭐ FIX: Check dim_user FIRST, not Supabase Auth!
+    const { data: dimUserData, error: dimUserError } = await supabase
+      .from('dim_user')
+      .select('user_id, email, full_name, google_id')
+      .eq('email', email)
+      .single();
 
     let userId;
+    let userName;
 
-    if (user) {
-      console.log('✅ User exists:', user.id);
-      userId = user.id;
+    if (dimUserData) {
+      // ✅ User exists in dim_user - use that ID!
+      console.log('✅ Existing user found in dim_user:', dimUserData.user_id);
+      userId = dimUserData.user_id;
+      userName = dimUserData.full_name;
+      
+      // Update google_id if it's missing
+      if (!dimUserData.google_id && googleId) {
+        await supabase
+          .from('dim_user')
+          .update({ google_id: googleId })
+          .eq('user_id', userId);
+        console.log('✅ Updated google_id for existing user');
+      }
     } else {
+      // User doesn't exist - create new one
       console.log('🆕 Creating new user...');
       
-      // Create new user
+      // Create new user in Supabase Auth
       const { data: newUser, error: createError } = await supabase.auth.admin.createUser({
         email,
         email_confirm: true,
@@ -177,10 +229,11 @@ router.post('/google', async (req, res) => {
       }
 
       userId = newUser.user.id;
-      console.log('✅ New user created:', userId);
+      userName = name;
+      console.log('✅ New user created in Auth:', userId);
 
       // ✅ INSERT INTO DIM_USER
-      const { error: dimUserError } = await supabase
+      const { error: insertError } = await supabase
         .from('dim_user')
         .insert({
           user_id: userId,
@@ -191,20 +244,21 @@ router.post('/google', async (req, res) => {
           is_active: true
         });
 
-      if (dimUserError) {
-        console.error('⚠️ dim_user insert error:', dimUserError);
-        // Continue anyway - auth user is created
+      if (insertError) {
+        console.error('⚠️ dim_user insert error:', insertError);
       } else {
         console.log('✅ User added to dim_user');
       }
     }
 
-    // Generate JWT token
+    // Generate JWT token with the correct userId
     const token = jwt.sign(
       { userId, email },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
+
+    console.log('✅ JWT token generated for user:', userId);
 
     res.json({
       success: true,
@@ -212,7 +266,7 @@ router.post('/google', async (req, res) => {
       user: {
         id: userId,
         email,
-        name
+        name: userName
       }
     });
   } catch (error) {
@@ -233,18 +287,23 @@ router.get('/me', async (req, res) => {
 
     const verified = jwt.verify(token, JWT_SECRET);
     
-    const { data: { user }, error } = await supabase.auth.admin.getUserById(verified.userId);
+    // ⭐ FIX: Get user from dim_user instead of auth
+    const { data: dimUser, error: dimError } = await supabase
+      .from('dim_user')
+      .select('user_id, email, full_name')
+      .eq('user_id', verified.userId)
+      .single();
 
-    if (error || !user) {
+    if (dimError || !dimUser) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     res.json({
       success: true,
       user: {
-        id: user.id,
-        email: user.email,
-        name: user.user_metadata?.name
+        id: dimUser.user_id,
+        email: dimUser.email,
+        name: dimUser.full_name
       }
     });
   } catch (error) {
