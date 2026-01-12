@@ -245,7 +245,7 @@ function parseReceiptText(text) {
 }
 
 // ============================================
-// SCAN RECEIPT - API Ninjas OCR
+// 🔥 FIXED: SCAN RECEIPT - Creates BOTH receipt AND expense
 // ============================================
 router.post('/scan', authenticateToken, upload.single('image'), async (req, res) => {
   try {
@@ -338,8 +338,8 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
       return res.status(500).json({ error: 'Failed to create dimension references' });
     }
 
-    // Step 6: Insert into fact_receipts
-    const { data: receipt, error: insertError } = await supabase
+    // 🔥 Step 6: Insert into fact_receipts FIRST
+    const { data: receipt, error: receiptError } = await supabase
       .from('fact_receipts')
       .insert([{
         user_id: req.user.userId,
@@ -349,26 +349,72 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
         amount: parseFloat(parsedData.total || 0),
         image_url: publicUrl
       }])
+      .select('receipt_id')
+      .single();
+
+    if (receiptError) {
+      console.error('❌ Failed to store receipt:', receiptError);
+      throw receiptError;
+    }
+
+    console.log('✅ Receipt stored in fact_receipts:', receipt.receipt_id);
+
+    // 🔥 Step 7: Create corresponding expense in fact_expenses with receipt_id reference
+    const { data: expense, error: expenseError } = await supabase
+      .from('fact_expenses')
+      .insert([{
+        user_id: req.user.userId,
+        amount: parseFloat(parsedData.total || 0),
+        category_id: categoryId,
+        date_id: dateId,
+        store_id: storeId,
+        description: parsedData.merchant || 'Receipt scan',
+        payment_method: 'Cash',
+        receipt_id: receipt.receipt_id  // 🔥 LINK TO RECEIPT
+      }])
       .select(`
-        *,
-        dim_category!fk_category(category_name, category_type, icon_name, color_code),
-        dim_date!fk_date(date_id, year, month, day_of_month),
-        dim_store!fk_store(store_name, store_type, location)
+        expense_id,
+        user_id,
+        amount,
+        description,
+        payment_method,
+        receipt_id,
+        created_at,
+        updated_at,
+        dim_category!fact_expenses_category_id_fkey(category_name),
+        dim_date!fact_expenses_date_id_fkey(date_id)
       `)
       .single();
 
-    if (insertError) {
-      console.error('❌ Failed to store receipt:', insertError);
-      throw insertError;
+    if (expenseError) {
+      console.error('❌ Failed to create expense:', expenseError);
+      // Don't throw - receipt is already created
+    } else {
+      console.log('✅ Expense created in fact_expenses:', expense.expense_id);
     }
 
-    console.log('✅ Receipt stored in fact_receipts');
-
+    // 🔥 Return EXPENSE data (not receipt) to match frontend expectations
     res.json({ 
       success: true, 
       data: parsedData,
-      receipt: receipt,
-      message: 'Receipt processed and stored successfully'
+      expense: expense ? {
+        id: expense.expense_id,
+        expense_id: expense.expense_id,
+        user_id: expense.user_id,
+        amount: expense.amount,
+        category: expense.dim_category?.category_name || parsedData.category,
+        description: expense.description,
+        date: expense.dim_date?.date_id,
+        date_id: expense.dim_date?.date_id,
+        payment_method: expense.payment_method,
+        receipt_id: expense.receipt_id,
+        created_at: expense.created_at,
+        updated_at: expense.updated_at,
+        dim_category: expense.dim_category,
+        dim_date: expense.dim_date
+      } : null,
+      receipt_id: receipt.receipt_id,
+      message: 'Receipt processed and expense created successfully'
     });
   } catch (error) {
     console.error('❌ OCR error:', error);
