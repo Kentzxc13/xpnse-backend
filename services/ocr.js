@@ -109,10 +109,12 @@ async function getOrCreateStoreId(storeName) {
 }
 
 // ============================================
-// HELPER: Parse receipt text
+// 🔥 IMPROVED: Parse receipt text with better amount extraction
 // ============================================
 function parseReceiptText(text) {
   const lines = text.split('\n').filter(line => line.trim());
+  
+  console.log('🔍 Parsing receipt with', lines.length, 'lines');
   
   // Extract merchant (first few meaningful lines)
   let merchant = 'Unknown Merchant';
@@ -138,7 +140,9 @@ function parseReceiptText(text) {
     /(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})/,
     /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i,
     /(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}/i,
-    /(\d{2}[-\/]\d{2}[-\/]\d{2})/
+    /(\d{2}[-\/]\d{2}[-\/]\d{2})/,
+    // 🔥 NEW: Handle "JUL 20, 25" format (month day, year)
+    /((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)\s+(\d{1,2}),?\s+(\d{2,4})/i
   ];
   
   for (const pattern of datePatterns) {
@@ -146,6 +150,8 @@ function parseReceiptText(text) {
     if (match) {
       try {
         let dateStr = match[0];
+        
+        // Handle 2-digit year
         if (/^\d{2}[-\/]\d{2}[-\/]\d{2}$/.test(dateStr)) {
           const parts = dateStr.split(/[-\/]/);
           const year = parseInt(parts[2]);
@@ -156,6 +162,7 @@ function parseReceiptText(text) {
         const parsedDate = new Date(dateStr);
         if (!isNaN(parsedDate.getTime()) && parsedDate.getFullYear() > 2000 && parsedDate.getFullYear() <= new Date().getFullYear()) {
           date = parsedDate.toISOString().split('T')[0];
+          console.log('✅ Extracted date:', date);
           break;
         }
       } catch (e) {
@@ -164,37 +171,82 @@ function parseReceiptText(text) {
     }
   }
   
-  // Extract total
+  // 🔥 IMPROVED: Extract total with better patterns and validation
   let total = 0;
+  
+  // Strategy 1: Look for explicit TOTAL labels
   const totalPatterns = [
-    /(?:TOTAL|AMOUNT DUE|GRAND TOTAL|BALANCE|NET AMOUNT)[:\s]*(?:PHP|₱|\$|Rs\.?|PHP\s|₱\s|\$\s)?\s*([\d,]+\.?\d*)/i,
-    /(?:AMOUNT|PAYMENT)[:\s]*(?:PHP|₱|\$|Rs\.?|PHP\s|₱\s|\$\s)?\s*([\d,]+\.?\d*)/i
+    // Common total labels with optional currency symbols
+    /(?:TOTAL|AMOUNT\s+DUE|GRAND\s+TOTAL|BALANCE|NET\s+AMOUNT|AMOUNT)[:\s]*(?:PHP|₱|\$|Rs\.?|PHP\s|₱\s|\$\s)?\s*([\d,]+\.?\d*)/i,
+    // Currency symbol followed by amount
+    /(?:PHP|₱|\$)\s*([\d,]+\.\d{2})/i,
+    // Just the pattern at end of line
+    /([\d,]+\.\d{2})\s*$/
   ];
   
+  console.log('🔍 Looking for total amount...');
+  
   for (const pattern of totalPatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      const amount = parseFloat(match[1].replace(/,/g, ''));
-      if (amount > 0 && amount < 1000000) {
-        total = amount;
-        break;
+    const matches = text.match(new RegExp(pattern.source, 'gi'));
+    if (matches) {
+      console.log('🔍 Found potential amounts:', matches);
+      
+      for (const match of matches) {
+        const numMatch = match.match(/([\d,]+\.?\d*)/);
+        if (numMatch) {
+          const amount = parseFloat(numMatch[1].replace(/,/g, ''));
+          console.log('🔍 Checking amount:', amount);
+          
+          // Validate: reasonable amount (not too small, not too large)
+          if (amount > 0 && amount < 1000000) {
+            // If we found "TOTAL:" nearby, prioritize this
+            if (/TOTAL/i.test(match)) {
+              total = amount;
+              console.log('✅ Found TOTAL:', amount);
+              break;
+            }
+            // Otherwise keep track of largest valid amount
+            if (amount > total) {
+              total = amount;
+              console.log('📝 Updated potential total:', amount);
+            }
+          }
+        }
+      }
+      
+      if (total > 0) break;
+    }
+  }
+  
+  // Strategy 2: Fallback - find all amounts and pick the largest reasonable one
+  if (total === 0) {
+    console.log('⚠️ No explicit TOTAL found, looking for largest amount...');
+    
+    // Get all numbers that look like prices (have 2 decimal places)
+    const allAmounts = text.match(/(?:PHP|₱|\$)?\s*([\d,]+\.\d{2})/g);
+    
+    if (allAmounts && allAmounts.length > 0) {
+      console.log('🔍 All amounts found:', allAmounts);
+      
+      const validAmounts = allAmounts
+        .map(a => {
+          const num = parseFloat(a.replace(/[^\d.]/g, ''));
+          return num;
+        })
+        .filter(n => n > 0 && n < 1000000)
+        .sort((a, b) => b - a); // Sort descending
+      
+      console.log('🔍 Valid amounts (sorted):', validAmounts);
+      
+      if (validAmounts.length > 0) {
+        // Usually the total is the largest amount
+        total = validAmounts[0];
+        console.log('✅ Using largest amount as total:', total);
       }
     }
   }
   
-  // Fallback: find largest number in last 10 lines
-  if (total === 0) {
-    const lastLines = lines.slice(-10).join('\n');
-    const allNumbers = lastLines.match(/(?:PHP|₱|\$|Rs\.?)?\s*([\d,]+\.\d{2})/g);
-    if (allNumbers && allNumbers.length > 0) {
-      const amounts = allNumbers
-        .map(n => parseFloat(n.replace(/[^\d.]/g, '')))
-        .filter(n => n > 0 && n < 1000000);
-      if (amounts.length > 0) {
-        total = Math.max(...amounts);
-      }
-    }
-  }
+  console.log('💰 Final extracted amount:', total);
   
   // Extract items
   const items = [];
@@ -220,7 +272,7 @@ function parseReceiptText(text) {
     'Groceries': ['grocery', 'supermarket', 'market', 'store', 'mart', 'sari', 'puregold', 'sm', 'savemore'],
     'Utilities': ['electric', 'water', 'internet', 'telco', 'utility', 'meralco', 'pldt', 'globe', 'smart', 'converge'],
     'Transportation': ['gas', 'fuel', 'taxi', 'transport', 'parking', 'grab', 'angkas', 'shell', 'petron', 'caltex'],
-    'Shopping': ['mall', 'shop', 'retail', 'boutique', 'department', 'robinson', 'ayala', 'lazada', 'shopee'],
+    'Shopping': ['mall', 'shop', 'retail', 'boutique', 'department', 'robinson', 'ayala', 'lazada', 'shopee', 'gaisano'],
     'Healthcare': ['pharmacy', 'hospital', 'clinic', 'medical', 'drug', 'mercury', 'watsons', 'south star']
   };
   
@@ -230,6 +282,7 @@ function parseReceiptText(text) {
   for (const [cat, keywords] of Object.entries(categoryKeywords)) {
     if (keywords.some(keyword => merchantLower.includes(keyword) || textLower.includes(keyword))) {
       category = cat;
+      console.log('✅ Categorized as:', category);
       break;
     }
   }
@@ -245,7 +298,8 @@ function parseReceiptText(text) {
 }
 
 // ============================================
-// 🔥 FIXED: SCAN RECEIPT - Creates BOTH receipt AND expense
+// 🔥 IMPROVED: SCAN ENDPOINT with better parsing + optional auto-save
+// Query param: ?autoSave=false to disable auto-save (default is true)
 // ============================================
 router.post('/scan', authenticateToken, upload.single('image'), async (req, res) => {
   try {
@@ -259,6 +313,10 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
         message: 'Please set API_NINJAS_KEY in .env file. Get free key at https://api-ninjas.com'
       });
     }
+
+    // 🔥 NEW: Check if auto-save is enabled (default true for backward compatibility)
+    const autoSave = req.query.autoSave !== 'false';
+    console.log('🔧 Auto-save mode:', autoSave);
 
     console.log('📸 Processing receipt with API Ninjas OCR...');
 
@@ -310,6 +368,12 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
     const parsedData = parseReceiptText(extractedText);
     console.log('✅ Parsed data:', parsedData);
 
+    // 🔥 VALIDATION: Check if we got a valid amount
+    if (parsedData.total === 0) {
+      console.warn('⚠️ Warning: Extracted amount is 0');
+      parsedData.warning = 'Could not extract amount from receipt. Please enter manually.';
+    }
+
     // Step 4: Upload image to Supabase Storage
     const fileName = `receipts/${req.user.userId}/${Date.now()}.jpg`;
     const { error: uploadError } = await supabase.storage
@@ -329,75 +393,102 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
 
     console.log('✅ Image uploaded:', publicUrl);
 
-    // Step 5: Get dimension IDs
-    const categoryId = await getOrCreateCategoryId(parsedData.category || 'Uncategorized');
-    const dateId = await getOrCreateDateId(parsedData.date || new Date().toISOString().split('T')[0]);
-    const storeId = parsedData.merchant ? await getOrCreateStoreId(parsedData.merchant) : null;
+    // 🔥 NEW: Only save to database if autoSave is enabled AND amount > 0
+    let receipt = null;
+    let expense = null;
 
-    if (!categoryId || !dateId) {
-      return res.status(500).json({ error: 'Failed to create dimension references' });
-    }
+    if (autoSave && parsedData.total > 0) {
+      console.log('💾 Auto-save enabled and amount valid, creating receipt and expense...');
 
-    // 🔥 Step 6: Insert into fact_receipts FIRST
-    const { data: receipt, error: receiptError } = await supabase
-      .from('fact_receipts')
-      .insert([{
-        user_id: req.user.userId,
-        date_id: dateId,
-        category_id: categoryId,
-        store_id: storeId,
-        amount: parseFloat(parsedData.total || 0),
-        image_url: publicUrl
-      }])
-      .select('receipt_id')
-      .single();
+      // Step 5: Get dimension IDs
+      const categoryId = await getOrCreateCategoryId(parsedData.category || 'Uncategorized');
+      const dateId = await getOrCreateDateId(parsedData.date || new Date().toISOString().split('T')[0]);
+      const storeId = parsedData.merchant ? await getOrCreateStoreId(parsedData.merchant) : null;
 
-    if (receiptError) {
-      console.error('❌ Failed to store receipt:', receiptError);
-      throw receiptError;
-    }
+      if (!categoryId || !dateId) {
+        return res.status(500).json({ error: 'Failed to create dimension references' });
+      }
 
-    console.log('✅ Receipt stored in fact_receipts:', receipt.receipt_id);
+      // 🔥 Step 6: Insert into fact_receipts FIRST
+      const { data: receiptData, error: receiptError } = await supabase
+        .from('fact_receipts')
+        .insert([{
+          user_id: req.user.userId,
+          date_id: dateId,
+          category_id: categoryId,
+          store_id: storeId,
+          amount: parseFloat(parsedData.total),
+          image_url: publicUrl
+        }])
+        .select('receipt_id')
+        .single();
 
-    // 🔥 Step 7: Create corresponding expense in fact_expenses with receipt_id reference
-    const { data: expense, error: expenseError } = await supabase
-      .from('fact_expenses')
-      .insert([{
-        user_id: req.user.userId,
-        amount: parseFloat(parsedData.total || 0),
-        category_id: categoryId,
-        date_id: dateId,
-        store_id: storeId,
-        description: parsedData.merchant || 'Receipt scan',
-        payment_method: 'Cash',
-        receipt_id: receipt.receipt_id  // 🔥 LINK TO RECEIPT
-      }])
-      .select(`
-        expense_id,
-        user_id,
-        amount,
-        description,
-        payment_method,
-        receipt_id,
-        created_at,
-        updated_at,
-        dim_category!fact_expenses_category_id_fkey(category_name),
-        dim_date!fact_expenses_date_id_fkey(date_id)
-      `)
-      .single();
+      if (receiptError) {
+        console.error('❌ Failed to store receipt:', receiptError);
+        throw receiptError;
+      }
 
-    if (expenseError) {
-      console.error('❌ Failed to create expense:', expenseError);
-      // Don't throw - receipt is already created
+      receipt = receiptData;
+      console.log('✅ Receipt stored in fact_receipts:', receipt.receipt_id);
+
+      // 🔥 Step 7: Create corresponding expense in fact_expenses with receipt_id reference
+      const { data: expenseData, error: expenseError } = await supabase
+        .from('fact_expenses')
+        .insert([{
+          user_id: req.user.userId,
+          amount: parseFloat(parsedData.total),
+          category_id: categoryId,
+          date_id: dateId,
+          store_id: storeId,
+          description: parsedData.merchant || 'Receipt scan',
+          payment_method: 'Cash',
+          receipt_id: receipt.receipt_id
+        }])
+        .select(`
+          expense_id,
+          user_id,
+          amount,
+          description,
+          payment_method,
+          receipt_id,
+          created_at,
+          updated_at,
+          dim_category!fact_expenses_category_id_fkey(category_name),
+          dim_date!fact_expenses_date_id_fkey(date_id)
+        `)
+        .single();
+
+      if (expenseError) {
+        console.error('❌ Failed to create expense:', expenseError);
+      } else {
+        expense = expenseData;
+        console.log('✅ Expense created in fact_expenses:', expense.expense_id);
+      }
+    } else if (autoSave && parsedData.total === 0) {
+      console.log('⏭️ Auto-save enabled but amount is 0, skipping database save');
     } else {
-      console.log('✅ Expense created in fact_expenses:', expense.expense_id);
+      console.log('⏭️ Auto-save disabled, skipping database operations');
     }
 
-    // 🔥 Return EXPENSE data (not receipt) to match frontend expectations
-    res.json({ 
-      success: true, 
-      data: parsedData,
-      expense: expense ? {
+    // 🔥 Return response with parsed data + optional expense info
+    const response = { 
+      success: true,
+      autoSave: autoSave,
+      data: {
+        store: parsedData.merchant,
+        amount: parsedData.total,
+        date: parsedData.date,
+        category: parsedData.category,
+        items: parsedData.items,
+        rawText: parsedData.rawText,
+        warning: parsedData.warning
+      },
+      image_url: publicUrl
+    };
+
+    // Add expense and receipt info if auto-saved
+    if (autoSave && expense) {
+      response.expense = {
         id: expense.expense_id,
         expense_id: expense.expense_id,
         user_id: expense.user_id,
@@ -412,10 +503,14 @@ router.post('/scan', authenticateToken, upload.single('image'), async (req, res)
         updated_at: expense.updated_at,
         dim_category: expense.dim_category,
         dim_date: expense.dim_date
-      } : null,
-      receipt_id: receipt.receipt_id,
-      message: 'Receipt processed and expense created successfully'
-    });
+      };
+      response.receipt_id = receipt.receipt_id;
+      response.message = 'Receipt processed and expense created successfully';
+    } else {
+      response.message = 'Receipt processed (not auto-saved - please review and confirm)';
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('❌ OCR error:', error);
     
